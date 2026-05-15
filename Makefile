@@ -14,6 +14,17 @@ ISO = $(OUTPUT_DIR)/AuriOS.iso
 #        make USE_ZIG=1    (uses Zig toolchain)
 # ==========================================
 USE_ZIG ?= 0
+HOST_OS := $(shell uname -s)
+
+ifeq ($(HOST_OS),Darwin)
+RUN_PREREQ = $(KERNEL_BIN)
+RUN_DESC = Starting QEMU on macOS (direct kernel boot)...
+RUN_CMD = qemu-system-i386 -kernel $(KERNEL_BIN) -m 512M -vga std -serial stdio -display cocoa,zoom-to-fit=on
+else
+RUN_PREREQ = iso
+RUN_DESC = Starting QEMU (x86_64)...
+RUN_CMD = qemu-system-x86_64 -cdrom $(ISO) -m 512M -boot d -vga std -serial stdio
+endif
 
 ifeq ($(USE_ZIG), 1)
     CC = zig cc -target x86-freestanding-none
@@ -47,7 +58,7 @@ OBJS = $(S_OBJS) $(ASM_OBJS) $(C_OBJS) $(ZIG_OBJS)
 .DEFAULT_GOAL := help
 
 # Phony targets
-.PHONY: all clean help iso run run32 run-mac install-fedora install-arch install-debian
+.PHONY: all clean help iso run install install-zig
 
 help:
 	@echo "======================= AuriOS Makefile ======================="
@@ -55,16 +66,11 @@ help:
 	@echo "Available targets:"
 	@echo "  make all            - Build everything"
 	@echo "  make iso            - Build OS binary and create bootable ISO"
-	@echo "  make run            - Build and run in QEMU (x86_64)"
-	@echo "  make run32          - Build and run in QEMU (i386)"
-	@echo "  make run-mac        - Build and run on macOS (direct boot)"
+	@echo "  make run            - Build and run in QEMU (auto-detect host OS)"
 	@echo "  make clean          - Remove all build artifacts"
 	@echo ""
 	@echo "Installation (requires sudo):"
-	@echo "  make install-fedora - Install dependencies for Fedora"
-	@echo "  make install-arch   - Install dependencies for Arch Linux"
-	@echo "  make install-debian - Install dependencies for Debian/Ubuntu"
-	@echo "  make install-mac    - Install dependencies for Mac (Brew required)"
+	@echo "  make install        - Install dependencies (auto-detect OS/distribution)"
 	@echo ""
 	@echo "Zig Toolchain (Optional):"
 	@echo "  make install-zig    - Auto-install Zig compiler based on your OS"
@@ -129,20 +135,10 @@ iso: $(KERNEL_BIN)
 	@grub-mkrescue -o $(ISO) $(ISO_DIR) 2>/dev/null || grub2-mkrescue -o $(ISO) $(ISO_DIR)
 	@echo "ISO created: $(ISO)"
 
-# Run in QEMU (x86_64)
-run: iso
-	@echo "Starting QEMU (x86_64)..."
-	@qemu-system-x86_64 -cdrom $(ISO) -m 512M -boot d -vga std -serial stdio
-
-# Run in QEMU (i386)
-run32: iso
-	@echo "Starting QEMU (i386)..."
-	@qemu-system-i386 -cdrom $(ISO) -m 512M -boot d -vga std -serial stdio
-
-# Run kernel directly on macOS (without ISO)
-run-mac: $(KERNEL_BIN)
-	@echo "Starting QEMU on macOS (direct kernel boot)..."
-	@qemu-system-i386 -kernel $(KERNEL_BIN) -m 512M -vga std -serial stdio -display cocoa,zoom-to-fit=on
+# Run in QEMU (auto-detect host OS)
+run: $(RUN_PREREQ)
+	@echo "$(RUN_DESC)"
+	@$(RUN_CMD)
 
 # Clean build artifacts
 clean:
@@ -150,25 +146,53 @@ clean:
 	@rm -rf $(BUILD_DIR) $(OUTPUT_DIR) $(ISO_DIR)
 	@echo "Clean complete."
 
-# Installation targets
-install-fedora:
-	@echo "[!] Installing dependencies for Fedora"
-	sudo dnf install gcc gcc-c++ binutils make wget tar texinfo gmp-devel mpfr-devel libmpc-devel nasm qemu-system-x86 grub2-tools-extra mtools xorriso clang-tools-extra
-	bash docs/install_scripts/install.sh
-
-install-arch:
-	@echo "[!] Installing dependencies for Arch Linux"
-	sudo pacman -S gcc binutils make wget tar nasm qemu-system-x86 grub mtools xorriso clang
-	bash docs/install_scripts/install.sh
-
-install-debian:
-	@echo "[!] Installing dependencies for Debian/Ubuntu"
-	sudo apt install gcc g++ binutils make wget tar mtools xorriso nasm qemu-system-x86 grub-pc-bin clang-format
-	bash docs/install_scripts/install.sh
-# need work
-install-mac:
-	@echo "[!] Installing dependencies for MacOS"
-	brew install qemu i686-elf-gcc nasm zig clang-format
+# Installation target (auto-detect OS/distribution)
+install:
+	@echo "[!] Detecting operating system..."
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		echo "[!] Installing dependencies for MacOS"; \
+		brew install qemu i686-elf-gcc nasm zig clang-format; \
+	elif [ -f /etc/os-release ]; then \
+		. /etc/os-release; \
+		case "$$ID" in \
+			arch|manjaro|endeavouros) \
+				echo "[!] Installing dependencies for Arch Linux"; \
+				sudo pacman -S gcc binutils make wget tar nasm qemu-system-x86 grub mtools xorriso clang; \
+				bash docs/install_scripts/install.sh; \
+				;; \
+			fedora|rhel|centos|rocky|almalinux) \
+				echo "[!] Installing dependencies for Fedora/RHEL-like"; \
+				sudo dnf install gcc gcc-c++ binutils make wget tar texinfo gmp-devel mpfr-devel libmpc-devel nasm qemu-system-x86 grub2-tools-extra mtools xorriso clang-tools-extra; \
+				bash docs/install_scripts/install.sh; \
+				;; \
+			debian|ubuntu|linuxmint|pop) \
+				echo "[!] Installing dependencies for Debian/Ubuntu-like"; \
+				sudo apt install gcc g++ binutils make wget tar mtools xorriso nasm qemu-system-x86 grub-pc-bin clang-format; \
+				bash docs/install_scripts/install.sh; \
+				;; \
+			*) \
+				if printf '%s' "$$ID_LIKE" | grep -Eq '(^| )arch( |$$)'; then \
+					echo "[!] Installing dependencies for Arch Linux (from ID_LIKE=$$ID_LIKE)"; \
+					sudo pacman -S gcc binutils make wget tar nasm qemu-system-x86 grub mtools xorriso clang; \
+					bash docs/install_scripts/install.sh; \
+				elif printf '%s' "$$ID_LIKE" | grep -Eq '(^| )fedora( |$$)|(^| )rhel( |$$)|(^| )centos( |$$)'; then \
+					echo "[!] Installing dependencies for Fedora/RHEL-like (from ID_LIKE=$$ID_LIKE)"; \
+					sudo dnf install gcc gcc-c++ binutils make wget tar texinfo gmp-devel mpfr-devel libmpc-devel nasm qemu-system-x86 grub2-tools-extra mtools xorriso clang-tools-extra; \
+					bash docs/install_scripts/install.sh; \
+				elif printf '%s' "$$ID_LIKE" | grep -Eq '(^| )debian( |$$)|(^| )ubuntu( |$$)'; then \
+					echo "[!] Installing dependencies for Debian/Ubuntu-like (from ID_LIKE=$$ID_LIKE)"; \
+					sudo apt install gcc g++ binutils make wget tar mtools xorriso nasm qemu-system-x86 grub-pc-bin clang-format; \
+					bash docs/install_scripts/install.sh; \
+				else \
+					echo "Unsupported Linux distribution: ID=$$ID ID_LIKE=$$ID_LIKE"; \
+					exit 1; \
+				fi; \
+				;; \
+		esac; \
+	else \
+		echo "Unsupported operating system: $$(uname)"; \
+		exit 1; \
+	fi
 
 install-zig:
 	@echo "[!] Detecting OS and installing Zig..."
